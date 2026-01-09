@@ -1,0 +1,11 @@
+{
+  "repo_path": "C:/Backups/Repo",
+  "sources": [
+    {
+      "path": "C:/TestData",
+      "exclude": [ "*.tmp" ]
+    }
+  ],
+  "use_vss": false,
+  "max_retries": 3
+}
