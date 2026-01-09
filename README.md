@@ -1,30 +1,38 @@
-\# Portable Incremental Backup Tool (Taşınabilir Artımlı Yedekleme)
+# Portable Incremental Backup Tool
 
+**Yazar:** Sergen Başakçı  
+**Platform:** Windows (Linux uyumlu – VSS hariç)  
+**Dil:** Python 3  
+**Arayüz:** PyQt6  
 
+---
 
-Python ile geliştirilmiş taşınabilir (portable) ve artımlı (incremental) yedekleme yazılımıdır.
+## 1. Proje Amacı
 
-Snapshot mantığıyla geçmiş yedekler saklanır. CLI ve PyQt6 GUI ile kullanılabilir.
+Bu projenin amacı; taşınabilir (portable), artımlı (incremental) yedekleme yapabilen,
+GUI ve CLI destekli bir masaüstü yedekleme yazılımı geliştirmektir.
 
+Uygulama;
+- Belirlenen klasörlerin yedeğini alır,
+- Aynı dosyayı birden fazla kez kopyalamaz,
+- Zaman bazlı snapshot’lar oluşturur,
+- İstenilen snapshot’tan geri yükleme yapabilir.
 
+---
 
-\## Özellikler
+## 2. Temel Özellikler
 
-\- SHA-256 içerik adresli depolama (.store)
+- ✅ Artımlı yedekleme (content-addressed storage)
+- ✅ Snapshot tabanlı yedekleme
+- ✅ GUI (PyQt6) + CLI desteği
+- ✅ Geri yükleme (restore)
+- ✅ Bütünlük doğrulama (verify)
+- ✅ Windows Volume Shadow Copy (opsiyonel)
+- ✅ Portable EXE üretimi (PyInstaller)
 
-\- Hardlink tabanlı snapshot mimarisi
+---
 
-\- Restore / Verify
+## 3. Mimari Yapı
 
-\- Opsiyonel Windows VSS (diskshadow)
-
-\- PyQt6 GUI
-
-\- PyInstaller ile tek dosya EXE üretimi
-
-
-
-\## Klasör Yapısı
-
-
+Proje modüler olarak tasarlanmıştır.
 
