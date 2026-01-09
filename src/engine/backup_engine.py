@@ -9,10 +9,6 @@ Portable Incremental Backup Engine — Sergen Başakçı
 - Restore / Verify
 - Windows VSS (diskshadow) opsiyonel (admin gerekir)
 - JSONL log (repo/logs)
-
-Not:
-- Windows path örnekleri docstring içinde C:/Users/... formatında yazılmıştır.
-  (C:\Users\... gibi ifadeler Python'da unicode escape hatasına yol açabilir.)
 """
 
 from __future__ import annotations
