@@ -1,7 +1,17 @@
+# Python
 __pycache__/
 *.pyc
-Backups/
+
+# Backup data (ÇOK ÖNEMLİ)
+.store/
+snapshots/
+logs/
+deneme/
+
+# Build
 dist/
 build/
 *.exe
+
+# Environment
 .env
