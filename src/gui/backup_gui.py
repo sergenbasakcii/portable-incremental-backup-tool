@@ -1,64 +1,60 @@
 ﻿# -*- coding: utf-8 -*-
-"""
-Backup & Restore GUI (PyQt6)
-Repo yapısı (önerilen):
-  src/
-    engine/backup_engine.py
-    gui/backup_gui.py
-
-Çalıştırma:
-  python src/gui/backup_gui.py
-"""
-
-from __future__ import annotations
-
 import sys
+import os
 import threading
 from pathlib import Path
-from typing import List
 
-# src/ klasörünü import path'e ekle (gui klasöründen engine import edebilmek için)
-SRC_DIR = Path(__file__).resolve().parents[1]
-if str(SRC_DIR) not in sys.path:
-    sys.path.insert(0, str(SRC_DIR))
+# --- HATA DÜZELTME BAŞLANGICI ---
+# Proje kök dizinini sys.path'e ekle (src modülünü bulabilmesi için)
+current_dir = Path(__file__).resolve().parent  # .../src/gui
+project_root = current_dir.parent.parent       # .../ (proje kökü)
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+# --- HATA DÜZELTME BİTİŞİ ---
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QPushButton, QVBoxLayout, QHBoxLayout,
-    QFileDialog, QLabel, QTextEdit, QLineEdit, QCheckBox, QListWidget, QTabWidget
+    QFileDialog, QLabel, QTextEdit, QLineEdit, QCheckBox, QListWidget, QTabWidget,
+    QRadioButton, QTreeWidget, QTreeWidgetItem, QMessageBox
 )
-from PyQt6.QtCore import QObject, pyqtSignal
+from PyQt6.QtCore import Qt, QObject, pyqtSignal
 
-# ✅ Modüler import (engine)
-from engine.backup_engine import backup, list_snapshots, restore
+from src.engine.backup_engine import (
+    backup, list_snapshots, restore_full_snapshot, restore_single_file
+)
 
+
+# ----------------- Log emitter (thread-safe) -----------------
 
 class LogEmitter(QObject):
     message = pyqtSignal(str)
 
 
+# ----------------- Ana Pencere -----------------
+
 class BackupRestoreApp(QMainWindow):
     def __init__(self):
         super().__init__()
 
-        self.setWindowTitle("Yedekleme Yazılımı - Backup & Restore GUI (Sergen Başakcı)")
-        self.resize(900, 650)
+        self.setWindowTitle("Portable Incremental Backup Tool - GUI (Sergen Başakcı)")
+        self.resize(1100, 650)
 
         self.log_emitter = LogEmitter()
         self.log_emitter.message.connect(self.append_log)
 
         self._build_ui()
 
-    # ---------------- UI ----------------
+    # --------- UI Kurulum ---------
 
     def _build_ui(self):
         tabs = QTabWidget()
 
-        # -------- BACKUP TAB --------
+        # ------------------ BACKUP TAB ------------------
         backup_tab = QWidget()
         backup_layout = QVBoxLayout()
 
+        # Source list
         self.sources_list = QListWidget()
-
         src_btn_layout = QHBoxLayout()
         self.btn_add_source = QPushButton("Kaynak Klasör Ekle")
         self.btn_remove_source = QPushButton("Seçili Kaynağı Sil")
@@ -67,6 +63,7 @@ class BackupRestoreApp(QMainWindow):
         src_btn_layout.addWidget(self.btn_add_source)
         src_btn_layout.addWidget(self.btn_remove_source)
 
+        # Repo
         repo_layout = QHBoxLayout()
         self.repo_edit = QLineEdit()
         self.btn_select_repo = QPushButton("Repo Klasörü Seç")
@@ -75,13 +72,26 @@ class BackupRestoreApp(QMainWindow):
         repo_layout.addWidget(self.repo_edit)
         repo_layout.addWidget(self.btn_select_repo)
 
-        excl_layout = QHBoxLayout()
-        self.exclude_edit = QLineEdit("*.tmp, *.log")
-        excl_layout.addWidget(QLabel("Exclude pattern (virgülle):"))
-        excl_layout.addWidget(self.exclude_edit)
+        # Include/Exclude mode (Radio)
+        mode_layout = QHBoxLayout()
+        mode_layout.addWidget(QLabel("Filtre modu:"))
+        self.rb_exclude = QRadioButton("Exclude (eşleşenleri alma)")
+        self.rb_include = QRadioButton("Include (sadece eşleşenleri al)")
+        self.rb_exclude.setChecked(True)
+        mode_layout.addWidget(self.rb_exclude)
+        mode_layout.addWidget(self.rb_include)
+        mode_layout.addStretch()
 
+        # Patterns
+        pat_layout = QHBoxLayout()
+        self.patterns_edit = QLineEdit("*.tmp, *.log")
+        pat_layout.addWidget(QLabel("Pattern (virgülle):"))
+        pat_layout.addWidget(self.patterns_edit)
+
+        # VSS
         self.chk_vss = QCheckBox("Windows VSS kullan (Shadow Copy)")
 
+        # Backup start
         self.btn_start_backup = QPushButton("Yedekleme Başlat")
         self.btn_start_backup.clicked.connect(self.start_backup)
 
@@ -90,16 +100,18 @@ class BackupRestoreApp(QMainWindow):
         backup_layout.addLayout(src_btn_layout)
         backup_layout.addSpacing(10)
         backup_layout.addLayout(repo_layout)
-        backup_layout.addLayout(excl_layout)
+        backup_layout.addLayout(mode_layout)
+        backup_layout.addLayout(pat_layout)
         backup_layout.addWidget(self.chk_vss)
         backup_layout.addWidget(self.btn_start_backup)
         backup_layout.addStretch()
         backup_tab.setLayout(backup_layout)
 
-        # -------- RESTORE TAB --------
+        # ------------------ RESTORE TAB ------------------
         restore_tab = QWidget()
         restore_layout = QVBoxLayout()
 
+        # Repo (restore için)
         r_repo_layout = QHBoxLayout()
         self.restore_repo_edit = QLineEdit()
         self.btn_restore_repo = QPushButton("Repo Klasörü Seç")
@@ -108,10 +120,20 @@ class BackupRestoreApp(QMainWindow):
         r_repo_layout.addWidget(self.restore_repo_edit)
         r_repo_layout.addWidget(self.btn_restore_repo)
 
-        self.snapshots_list = QListWidget()
+        # Sol: Snapshot list (+) -> QTreeWidget
+        self.snapshot_tree = QTreeWidget()
+        self.snapshot_tree.setHeaderLabels(["Snapshot (+)"])
+        self.snapshot_tree.itemSelectionChanged.connect(self.on_snapshot_selected)
+
         self.btn_load_snapshots = QPushButton("Snapshot Listele")
         self.btn_load_snapshots.clicked.connect(self.load_snapshots)
 
+        # Sağ: Seçilen snapshot içindeki dosyalar
+        self.file_tree = QTreeWidget()
+        self.file_tree.setHeaderLabels(["Dosya / Klasör", "Boyut"])
+        self.file_tree.setColumnWidth(0, 520)
+
+        # Target folder
         target_layout = QHBoxLayout()
         self.restore_target_edit = QLineEdit()
         self.btn_restore_target = QPushButton("Hedef Klasör Seç")
@@ -120,35 +142,45 @@ class BackupRestoreApp(QMainWindow):
         target_layout.addWidget(self.restore_target_edit)
         target_layout.addWidget(self.btn_restore_target)
 
-        self.btn_start_restore = QPushButton("Seçili Snapshot'ı Geri Yükle")
-        self.btn_start_restore.clicked.connect(self.start_restore)
+        # Restore buttons
+        btns_layout = QHBoxLayout()
+        self.btn_restore_full = QPushButton("Seçili Snapshot'ı TAM Geri Yükle")
+        self.btn_restore_file = QPushButton("Seçili DOSYAYI Geri Yükle (Tek Dosya)")
+        self.btn_restore_full.clicked.connect(self.start_restore_full)
+        self.btn_restore_file.clicked.connect(self.start_restore_file)
+        btns_layout.addWidget(self.btn_restore_full)
+        btns_layout.addWidget(self.btn_restore_file)
+
+        # Split layout (sol snapshot + sağ file tree)
+        split = QHBoxLayout()
+        split.addWidget(self.snapshot_tree, 1)
+        split.addWidget(self.file_tree, 2)
 
         restore_layout.addLayout(r_repo_layout)
-        restore_layout.addWidget(QLabel("Snapshot Listesi:"))
-        restore_layout.addWidget(self.snapshots_list)
         restore_layout.addWidget(self.btn_load_snapshots)
+        restore_layout.addLayout(split)
         restore_layout.addLayout(target_layout)
-        restore_layout.addWidget(self.btn_start_restore)
+        restore_layout.addLayout(btns_layout)
         restore_layout.addStretch()
         restore_tab.setLayout(restore_layout)
 
-        # -------- ORTAK LOG --------
+        # ------------------ ORTAK LOG ------------------
         self.log_output = QTextEdit()
         self.log_output.setReadOnly(True)
 
+        main_widget = QWidget()
+        main_layout = QVBoxLayout()
         tabs.addTab(backup_tab, "Backup")
         tabs.addTab(restore_tab, "Restore")
 
-        main_widget = QWidget()
-        main_layout = QVBoxLayout()
         main_layout.addWidget(tabs)
         main_layout.addWidget(QLabel("Log:"))
         main_layout.addWidget(self.log_output)
-        main_widget.setLayout(main_layout)
 
+        main_widget.setLayout(main_layout)
         self.setCentralWidget(main_widget)
 
-    # ---------------- LOG ----------------
+    # --------- Genel Log ---------
 
     def append_log(self, text: str):
         text = (text or "").rstrip()
@@ -157,10 +189,10 @@ class BackupRestoreApp(QMainWindow):
         self.log_output.append(text)
         self.log_output.ensureCursorVisible()
 
-    def log(self, msg: str):
-        self.log_emitter.message.emit(msg)
+    def msg(self, title: str, text: str):
+        QMessageBox.information(self, title, text)
 
-    # ---------------- BACKUP ----------------
+    # --------- Backup kısmı ---------
 
     def add_source_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Kaynak klasör seç")
@@ -169,7 +201,8 @@ class BackupRestoreApp(QMainWindow):
 
     def remove_selected_source(self):
         for item in self.sources_list.selectedItems():
-            self.sources_list.takeItem(self.sources_list.row(item))
+            row = self.sources_list.row(item)
+            self.sources_list.takeItem(row)
 
     def select_repo_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Repo klasörü seç")
@@ -183,48 +216,51 @@ class BackupRestoreApp(QMainWindow):
         self.btn_select_repo.setEnabled(enabled)
         self.btn_start_backup.setEnabled(enabled)
         self.chk_vss.setEnabled(enabled)
+        self.rb_exclude.setEnabled(enabled)
+        self.rb_include.setEnabled(enabled)
+        self.patterns_edit.setEnabled(enabled)
 
     def start_backup(self):
         sources = [self.sources_list.item(i).text() for i in range(self.sources_list.count())]
         repo = self.repo_edit.text().strip()
 
         if not sources:
-            self.log("❌ En az bir kaynak klasör seçmelisin.")
+            self.append_log("❌ En az bir kaynak klasör seçmelisin.")
             return
         if not repo:
-            self.log("❌ Repo klasörü seçilmedi.")
+            self.append_log("❌ Repo klasörü seçilmedi.")
             return
 
-        excludes = [x.strip() for x in self.exclude_edit.text().split(",") if x.strip()]
+        patterns = [x.strip() for x in self.patterns_edit.text().split(",") if x.strip()]
+        mode = "exclude" if self.rb_exclude.isChecked() else "include"
         use_vss = self.chk_vss.isChecked()
+        max_retries = 3
 
-        self.log("🚀 Yedekleme başlıyor...")
-        self.log(f"→ Kaynaklar: {sources}")
-        self.log(f"→ Repo: {repo}")
-        self.log(f"→ Exclude: {excludes}")
-        self.log(f"→ VSS: {use_vss}")
+        self.append_log("🚀 Yedekleme başlıyor...")
+        self.append_log(f"→ Kaynaklar: {sources}")
+        self.append_log(f"→ Repo: {repo}")
+        self.append_log(f"→ Mode: {mode}")
+        self.append_log(f"→ Patterns: {patterns}")
+        self.append_log(f"→ VSS: {use_vss}")
 
         self.set_backup_controls_enabled(False)
 
         th = threading.Thread(
             target=self._run_backup_thread,
-            args=(repo, sources, excludes, use_vss),
+            args=(repo, sources, patterns, mode, use_vss, max_retries),
             daemon=True
         )
         th.start()
 
-    def _run_backup_thread(self, repo: str, sources: List[str], excludes: List[str], use_vss: bool):
+    def _run_backup_thread(self, repo, sources, patterns, mode, use_vss, max_retries):
         repo_path = Path(repo)
         source_paths = [Path(s) for s in sources]
-        max_retries = 3
 
-        # stdout yakalama (engine print() çıktıları log'a düşsün)
         class QtStdout:
             def write(inner_self, s):
-                s = (s or "").rstrip()
+                s = s.rstrip()
                 if s:
                     self.log_emitter.message.emit(s)
-
             def flush(inner_self):
                 pass
 
@@ -232,16 +268,15 @@ class BackupRestoreApp(QMainWindow):
         sys.stdout = QtStdout()
 
         try:
-            backup(repo_path, source_paths, excludes, use_vss, max_retries)
+            backup(repo_path, source_paths, patterns, mode, use_vss, max_retries)
             self.log_emitter.message.emit("✅ Yedekleme tamamlandı.")
         except Exception as e:
             self.log_emitter.message.emit(f"❌ Yedekleme hatası: {e}")
         finally:
             sys.stdout = old_stdout
-            # UI'yi tekrar aktif et
             self.set_backup_controls_enabled(True)
 
-    # ---------------- RESTORE ----------------
+    # --------- Restore kısmı ---------
 
     def select_restore_repo(self):
         folder = QFileDialog.getExistingDirectory(self, "Repo klasörü seç")
@@ -251,78 +286,197 @@ class BackupRestoreApp(QMainWindow):
     def load_snapshots(self):
         repo = self.restore_repo_edit.text().strip()
         if not repo:
-            self.log("❌ Önce bir repo klasörü seç.")
+            self.append_log("❌ Önce bir repo klasörü seç.")
             return
 
         repo_path = Path(repo)
         try:
             snaps = list_snapshots(repo_path)
         except Exception as e:
-            self.log(f"❌ Snapshot listeleme hatası: {e}")
+            self.append_log(f"❌ Snapshot listeleme hatası: {e}")
             return
 
-        self.snapshots_list.clear()
+        self.snapshot_tree.clear()
+        self.file_tree.clear()
+
         if not snaps:
-            self.log("ℹ️ Snapshot bulunamadı.")
+            self.append_log("ℹ️ Snapshot bulunamadı.")
             return
 
-        for s in snaps:
-            self.snapshots_list.addItem(s)
+        for snap in snaps:
+            item = QTreeWidgetItem([snap])
+            # “+” görünmesi için dummy child ekliyoruz
+            item.addChild(QTreeWidgetItem(["(+)"]))
+            item.setData(0, Qt.ItemDataRole.UserRole, snap)
+            self.snapshot_tree.addTopLevelItem(item)
 
-        self.log(f"📁 {len(snaps)} snapshot listelendi.")
+        self.append_log(f"📁 {len(snaps)} snapshot listelendi. Birini seç.")
+
+    def on_snapshot_selected(self):
+        repo = self.restore_repo_edit.text().strip()
+        if not repo:
+            return
+        items = self.snapshot_tree.selectedItems()
+        if not items:
+            return
+
+        snap_item = items[0]
+        snapshot_id = snap_item.data(0, Qt.ItemDataRole.UserRole)
+        if not snapshot_id:
+            return
+
+        self.load_snapshot_files(repo, snapshot_id)
+
+    def load_snapshot_files(self, repo: str, snapshot_id: str):
+        """
+        Sağ panelde snapshot içindeki files/ ağacını gösterir.
+        Dosyaların relative path'i item data içine yazılır.
+        """
+        self.file_tree.clear()
+
+        repo_path = Path(repo)
+        files_root = repo_path / "snapshots" / snapshot_id / "files"
+
+        if not files_root.exists():
+            self.append_log("❌ Seçilen snapshot'ta files klasörü yok.")
+            return
+
+        root_item = QTreeWidgetItem([f"{snapshot_id} (files)"])
+        root_item.setExpanded(True)
+        root_item.setData(0, Qt.ItemDataRole.UserRole, "")  # root
+        self.file_tree.addTopLevelItem(root_item)
+
+        # Klasör->QTreeWidgetItem cache
+        node_map = {files_root: root_item}
+
+        for dirpath, dirnames, filenames in os.walk(files_root):
+            dir_path = Path(dirpath)
+            parent_item = node_map.get(dir_path)
+            if parent_item is None:
+                continue
+
+            # Dizinleri ekle
+            for d in sorted(dirnames):
+                p = dir_path / d
+                it = QTreeWidgetItem([d, ""])
+                it.setData(0, Qt.ItemDataRole.UserRole, str(p.relative_to(files_root)).replace("\\", "/"))
+                parent_item.addChild(it)
+                node_map[p] = it
+
+            # Dosyaları ekle
+            for f in sorted(filenames):
+                p = dir_path / f
+                size = ""
+                try:
+                    size = str(p.stat().st_size)
+                except Exception:
+                    size = ""
+                it = QTreeWidgetItem([f, size])
+                it.setData(0, Qt.ItemDataRole.UserRole, str(p.relative_to(files_root)).replace("\\", "/"))
+                parent_item.addChild(it)
+
+        self.append_log(f"✅ Snapshot dosyaları yüklendi: {snapshot_id}")
 
     def select_restore_target(self):
         folder = QFileDialog.getExistingDirectory(self, "Geri yükleme hedef klasörü seç")
         if folder:
             self.restore_target_edit.setText(folder)
 
-    def set_restore_controls_enabled(self, enabled: bool):
-        self.btn_restore_repo.setEnabled(enabled)
-        self.btn_load_snapshots.setEnabled(enabled)
-        self.snapshots_list.setEnabled(enabled)
-        self.btn_restore_target.setEnabled(enabled)
-        self.btn_start_restore.setEnabled(enabled)
+    def get_selected_snapshot(self) -> str | None:
+        items = self.snapshot_tree.selectedItems()
+        if not items:
+            return None
+        snapshot_id = items[0].data(0, Qt.ItemDataRole.UserRole)
+        return snapshot_id
 
-    def start_restore(self):
+    def get_selected_file_relpath(self) -> str | None:
+        """
+        File tree’de seçilen item dosyaysa relative path döndürür.
+        """
+        items = self.file_tree.selectedItems()
+        if not items:
+            return None
+
+        rel = items[0].data(0, Qt.ItemDataRole.UserRole)
+        if rel is None:
+            return None
+
+        rel = str(rel).strip()
+        if rel == "":
+            return None  # root seçilmiş olabilir
+
+        # Dosya mı? (boyut sütunu doluysa dosya kabul ediyoruz)
+        is_file = bool(items[0].text(1).strip())
+        return rel if is_file else None
+
+    def start_restore_full(self):
         repo = self.restore_repo_edit.text().strip()
         target = self.restore_target_edit.text().strip()
-        selected_items = self.snapshots_list.selectedItems()
+        snapshot_id = self.get_selected_snapshot()
 
         if not repo:
-            self.log("❌ Repo klasörü seçilmedi.")
+            self.append_log("❌ Repo seçilmedi.")
             return
-        if not selected_items:
-            self.log("❌ Bir snapshot seçmelisin.")
+        if not snapshot_id:
+            self.append_log("❌ Bir snapshot seçmelisin.")
             return
         if not target:
-            self.log("❌ Geri yükleme hedef klasörü seçilmedi.")
+            self.append_log("❌ Hedef klasör seçmelisin.")
             return
 
-        snapshot_id = selected_items[0].text()
-
-        self.log("🔄 Geri yükleme başlıyor...")
-        self.log(f"→ Repo: {repo}")
-        self.log(f"→ Snapshot: {snapshot_id}")
-        self.log(f"→ Hedef: {target}")
-
-        self.set_restore_controls_enabled(False)
+        self.append_log(f"🔄 TAM Restore başlıyor → Snapshot: {snapshot_id} → Target: {target}")
 
         th = threading.Thread(
-            target=self._run_restore_thread,
+            target=self._run_restore_full_thread,
             args=(repo, snapshot_id, target),
             daemon=True
         )
         th.start()
 
-    def _run_restore_thread(self, repo: str, snapshot_id: str, target: str):
+    def _run_restore_full_thread(self, repo: str, snapshot_id: str, target: str):
         try:
-            restore(Path(repo), snapshot_id, Path(target))
-            self.log_emitter.message.emit("✅ Geri yükleme tamamlandı.")
+            restore_full_snapshot(Path(repo), snapshot_id, Path(target))
+            self.log_emitter.message.emit("✅ TAM restore tamamlandı.")
         except Exception as e:
-            self.log_emitter.message.emit(f"❌ Geri yükleme hatası: {e}")
-        finally:
-            self.set_restore_controls_enabled(True)
+            self.log_emitter.message.emit(f"❌ Restore hatası: {e}")
 
+    def start_restore_file(self):
+        repo = self.restore_repo_edit.text().strip()
+        target = self.restore_target_edit.text().strip()
+        snapshot_id = self.get_selected_snapshot()
+        rel = self.get_selected_file_relpath()
+
+        if not repo:
+            self.append_log("❌ Repo seçilmedi.")
+            return
+        if not snapshot_id:
+            self.append_log("❌ Bir snapshot seçmelisin.")
+            return
+        if not target:
+            self.append_log("❌ Hedef klasör seçmelisin.")
+            return
+        if not rel:
+            self.append_log("❌ Sağdaki listeden bir DOSYA seçmelisin (klasör olmaz).")
+            return
+
+        self.append_log(f"🔄 Tek dosya restore → Snapshot: {snapshot_id} → File: {rel} → Target: {target}")
+
+        th = threading.Thread(
+            target=self._run_restore_file_thread,
+            args=(repo, snapshot_id, rel, target),
+            daemon=True
+        )
+        th.start()
+
+    def _run_restore_file_thread(self, repo: str, snapshot_id: str, rel: str, target: str):
+        try:
+            out = restore_single_file(Path(repo), snapshot_id, rel, Path(target))
+            self.log_emitter.message.emit(f"✅ Tek dosya restore tamamlandı: {out}")
+        except Exception as e:
+            self.log_emitter.message.emit(f"❌ Tek dosya restore hatası: {e}")
+
+
+# ----------------- Main -----------------
 
 def main():
     app = QApplication(sys.argv)

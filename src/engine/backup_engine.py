@@ -7,8 +7,12 @@ Portable Incremental Backup Engine — Sergen Başakçı
 - Snapshot: repo/snapshots/<timestamp>/files altında hardlink (fallback copy)
 - Manifest: snapshot/manifest.json
 - Restore / Verify
+- Tek dosya restore (file-level restore)
 - Windows VSS (diskshadow) opsiyonel (admin gerekir)
 - JSONL log (repo/logs)
+
+Not:
+- Windows path örnekleri docstring içinde C:/Users/... formatında yazılmıştır.
 """
 
 from __future__ import annotations
@@ -23,16 +27,11 @@ import os
 import platform
 import shutil
 import subprocess
-import sys
 import tempfile
 import threading
 import time
 from pathlib import Path
 from typing import List, Tuple, Optional
-
-# ----------------------------
-# Genel Ayarlar / Sabitler
-# ----------------------------
 
 IS_WIN = platform.system().lower().startswith("win")
 
@@ -63,12 +62,7 @@ class Logger:
 # ----------------------------
 
 class VSSContext:
-    """
-    Windows Volume Shadow Copy ile okuma için snapshot oluşturur.
-    diskshadow ile volume snapshot alır, sonrasında expose eder.
-
-    Admin yetkisi gerektirir. Admin yoksa otomatik devre dışı kalır.
-    """
+    """Windows Volume Shadow Copy ile okuma için snapshot oluşturur."""
 
     def __init__(self, sources: List[Path]):
         self.enabled = IS_WIN
@@ -81,7 +75,6 @@ class VSSContext:
         if not self.enabled:
             return self
 
-        # Yönetici kontrolü
         try:
             is_admin = ctypes.windll.shell32.IsUserAnAdmin() != 0
         except Exception:
@@ -93,22 +86,14 @@ class VSSContext:
             return self
 
         if not self.volumes:
-            # Sürücü harfi yoksa (örn. UNC path) VSS yapamayız
-            print("[VSS] Drive letter bulunamadı (UNC path olabilir) → VSS devre dışı.")
+            print("[VSS] Drive letter bulunamadı (UNC olabilir) → VSS devre dışı.")
             self.enabled = False
             return self
 
-        # Diskshadow script üretimi:
-        # Önemli: CREATE -> sonra EXPOSE
-        script: List[str] = [
-            "SET CONTEXT PERSISTENT",
-            "BEGIN BACKUP",
-        ]
-
+        script: List[str] = ["SET CONTEXT PERSISTENT", "BEGIN BACKUP"]
         letters = list("ZYXWVUTSRQPONMLKJHGFEDCBA")
 
-        # önce volume ekle
-        aliases: List[Tuple[str, str]] = []  # (vol, alias)
+        aliases: List[Tuple[str, str]] = []
         for i, vol in enumerate(sorted(self.volumes)):
             alias = f"A{i}"
             script.append(f"ADD VOLUME {vol} ALIAS {alias}")
@@ -116,7 +101,6 @@ class VSSContext:
 
         script.append("CREATE")
 
-        # sonra expose et
         for i, (vol, alias) in enumerate(aliases):
             if i >= len(letters):
                 break
@@ -129,27 +113,15 @@ class VSSContext:
         scr = self.tmpdir / "create.dsh"
         scr.write_text("\n".join(script), encoding="utf-8")
 
-        result = subprocess.run(
-            ["diskshadow", "/s", str(scr)],
-            capture_output=True, text=True
-        )
-
+        result = subprocess.run(["diskshadow", "/s", str(scr)], capture_output=True, text=True)
         if result.returncode != 0:
-            print("[VSS] diskshadow başarısız, VSS kapatıldı.")
-            # Debug gerekirse:
-            # print(result.stdout)
-            # print(result.stderr)
+            print("[VSS] diskshadow başarısız → VSS kapatıldı.")
             self.enabled = False
 
         return self
 
     def map_path(self, p: Path) -> Path:
-        """
-        Örn: C:/Users/... -> Z:/Users/...
-
-        Bu fonksiyon, kaynak dosya yolu bir sürücü harfi içeriyorsa
-        (örn. C:) bunu VSS expose edilen sürücüye (örn. Z:) map eder.
-        """
+        """Örn: C:/Users/... -> Z:/Users/..."""
         if not (self.enabled and p.drive):
             return p
 
@@ -158,32 +130,27 @@ class VSSContext:
         if mapped_drive:
             mapped = str(p).replace(original, mapped_drive, 1)
             return Path(mapped)
-
         return p
 
     def __exit__(self, exc_type, exc, tb):
         if not (self.enabled and self.tmpdir):
             return False
 
-        # Temizlik
         script: List[str] = ["BEGIN BACKUP"]
-
         for mapped in self.drive_map.values():
             script.append(f"UNEXPOSE {mapped}")
-
         script.append("DELETE SHADOWS ALL")
         script.append("END BACKUP")
 
         scr = self.tmpdir / "cleanup.dsh"
         scr.write_text("\n".join(script), encoding="utf-8")
-
         subprocess.run(["diskshadow", "/s", str(scr)], capture_output=True)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
         return False
 
 
 # ----------------------------
-# Yardımcı Fonksiyonlar
+# Helpers
 # ----------------------------
 
 def sha256_file(path: Path) -> str:
@@ -197,21 +164,36 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
-def should_exclude(path: Path, patterns: List[str]) -> bool:
+def match_patterns(path: Path, patterns: List[str]) -> bool:
     """
-    Exclude pattern kontrolü:
-    - Tam path'e göre
-    - Dosya adına göre
+    Pattern eşleşmesi:
+    - Dosya adına göre (öncelikli)
+    - Tam path'e göre (ikincil)
     """
-    s_full = str(path)
-    s_name = path.name
+    name = path.name
+    full = str(path)
     for pat in patterns or []:
-        pat = pat.strip()
+        pat = (pat or "").strip()
         if not pat:
             continue
-        if fnmatch.fnmatch(s_full, pat) or fnmatch.fnmatch(s_name, pat):
+        if fnmatch.fnmatch(name, pat) or fnmatch.fnmatch(full, pat):
             return True
     return False
+
+
+def should_process(path: Path, patterns: List[str], mode: str) -> bool:
+    """
+    mode:
+      - 'exclude': pattern match olanları alma
+      - 'include': sadece pattern match olanları al
+    """
+    mode = (mode or "exclude").strip().lower()
+    matched = match_patterns(path, patterns)
+
+    if mode == "include":
+        return matched
+    # default exclude
+    return not matched
 
 
 def ensure_hardlink_or_copy(src: Path, dst: Path):
@@ -219,13 +201,13 @@ def ensure_hardlink_or_copy(src: Path, dst: Path):
     try:
         if dst.exists():
             dst.unlink()
-        os.link(src, dst)  # hardlink
+        os.link(src, dst)
     except Exception:
-        shutil.copy2(src, dst)  # fallback copy
+        shutil.copy2(src, dst)
 
 
 # ----------------------------
-# Snapshot / Restore yardımcıları
+# Snapshot Helpers
 # ----------------------------
 
 def list_snapshots(repo: Path) -> List[str]:
@@ -251,21 +233,45 @@ def resolve_snapshot(repo: Path, snapshot_id: str) -> Path:
     return snap
 
 
-def restore(repo: Path, snapshot_id: str, target: Path):
+def snapshot_files_root(repo: Path, snapshot_id: str) -> Path:
     snap = resolve_snapshot(repo, snapshot_id)
-    files_dir = snap / "files"
-    if not files_dir.exists():
+    root = snap / "files"
+    if not root.exists():
         raise RuntimeError("Geçersiz snapshot: files klasörü yok.")
+    return root
 
+
+# ----------------------------
+# Restore / Verify
+# ----------------------------
+
+def restore_full_snapshot(repo: Path, snapshot_id: str, target: Path):
+    files_dir = snapshot_files_root(repo, snapshot_id)
     target.mkdir(parents=True, exist_ok=True)
 
-    for dirpath, dirnames, filenames in os.walk(files_dir):
+    for dirpath, _, filenames in os.walk(files_dir):
         for name in filenames:
             src = Path(dirpath) / name
             rel = src.relative_to(files_dir)
             dst = target / rel
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dst)
+
+
+def restore_single_file(repo: Path, snapshot_id: str, rel_path: str, target_dir: Path) -> Path:
+    """
+    rel_path: snapshot files root altındaki relative path (örn: TestData/a/b.pdf)
+    """
+    files_dir = snapshot_files_root(repo, snapshot_id)
+    src = files_dir / rel_path
+
+    if not src.exists() or not src.is_file():
+        raise RuntimeError(f"Dosya bulunamadı: {rel_path}")
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+    dst = target_dir / Path(rel_path).name
+    shutil.copy2(src, dst)
+    return dst
 
 
 def verify(repo: Path, snapshot_id: str):
@@ -295,24 +301,26 @@ def verify(repo: Path, snapshot_id: str):
 # Backup Engine
 # ----------------------------
 
-def backup(repo: Path, sources: List[Path], exclude: List[str], use_vss: bool, max_retries: int):
+def backup(
+    repo: Path,
+    sources: List[Path],
+    patterns: List[str],
+    pattern_mode: str,
+    use_vss: bool,
+    max_retries: int
+):
     """
-    repo: yedekleme deposu
-    sources: yedeklenecek klasörler
-    exclude: pattern listesi
-    use_vss: Windows VSS kullan
-    max_retries: başarısız dosyada retry sayısı
+    patterns + pattern_mode:
+      - mode 'exclude': pattern match olanları SKIP
+      - mode 'include': pattern match olmayanları SKIP
     """
-    print("BACKUP BAŞLADI")
-    print("Repo:", repo)
-    print("Sources:", sources)
+    repo = repo.expanduser().resolve()
+    srcs = [p.expanduser().resolve() for p in sources]
 
-    if not sources:
+    if not srcs:
         raise RuntimeError("En az bir kaynak klasör gerekli.")
 
-    repo = repo.expanduser().resolve()
     repo.mkdir(parents=True, exist_ok=True)
-
     (repo / "snapshots").mkdir(parents=True, exist_ok=True)
     (repo / "logs").mkdir(parents=True, exist_ok=True)
 
@@ -325,20 +333,30 @@ def backup(repo: Path, sources: List[Path], exclude: List[str], use_vss: bool, m
     store.mkdir(parents=True, exist_ok=True)
 
     logger = Logger(repo / "logs" / f"backup-{timestamp}.jsonl")
-    logger.write({"event": "start", "timestamp": timestamp, "repo": str(repo), "sources": [str(s) for s in sources]})
+    logger.write({
+        "event": "start",
+        "timestamp": timestamp,
+        "repo": str(repo),
+        "sources": [str(s) for s in srcs],
+        "pattern_mode": pattern_mode,
+        "patterns": patterns
+    })
 
     manifest = {"timestamp": timestamp, "entries": []}
 
-    # VSS context hazırlığı
-    srcs = [p.expanduser().resolve() for p in sources]
     ctx = VSSContext(srcs) if (use_vss and IS_WIN) else None
 
-    # fallback – boş context manager
     class Dummy:
         def __enter__(self): return self
         def __exit__(self, *a): return False
 
     context = ctx if ctx else Dummy()
+
+    print("BACKUP BAŞLADI")
+    print("Repo:", repo)
+    print("Sources:", srcs)
+    print("Mode:", pattern_mode)
+    print("Patterns:", patterns)
 
     with context:
         for root in srcs:
@@ -350,14 +368,13 @@ def backup(repo: Path, sources: List[Path], exclude: List[str], use_vss: bool, m
                 continue
 
             print("İşleniyor:", mapped_root)
-            logger.write({"event": "walk_start", "path": str(mapped_root)})
 
-            for dirpath, dirnames, filenames in os.walk(mapped_root):
+            for dirpath, _, filenames in os.walk(mapped_root):
                 for name in filenames:
                     s = Path(dirpath) / name
 
-                    if should_exclude(s, exclude):
-                        logger.write({"event": "skip", "path": str(s)})
+                    if not should_process(s, patterns, pattern_mode):
+                        logger.write({"event": "skip_by_filter", "path": str(s)})
                         continue
 
                     try:
@@ -396,7 +413,6 @@ def backup(repo: Path, sources: List[Path], exclude: List[str], use_vss: bool, m
                                 "size": size,
                                 "mtime": mtime
                             })
-
                             break
 
                         except Exception as e:
@@ -407,7 +423,6 @@ def backup(repo: Path, sources: List[Path], exclude: List[str], use_vss: bool, m
                                 break
                             time.sleep(min(5 * attempt, 30))
 
-    # manifest kaydet
     with (snapshot / "manifest.json").open("w", encoding="utf-8") as f:
         json.dump(manifest, f, ensure_ascii=False, indent=2)
 
@@ -419,20 +434,30 @@ def backup(repo: Path, sources: List[Path], exclude: List[str], use_vss: bool, m
 # Config
 # ----------------------------
 
-def load_config(path: Path) -> Tuple[Path, List[Path], List[str], bool, int]:
+def load_config(path: Path) -> Tuple[Path, List[Path], List[str], str, bool, int]:
+    """
+    Geriye dönük uyumluluk:
+      - eski config: exclude vardı
+      - yeni: patterns + pattern_mode
+    """
     cfg = json.loads(path.read_text(encoding="utf-8"))
 
     repo = Path(cfg["repo_path"]).expanduser()
     sources = [Path(s["path"]).expanduser() for s in cfg.get("sources", [])]
 
-    exclude: List[str] = []
+    # Eski config: sources[*].exclude
+    patterns: List[str] = []
     for s in cfg.get("sources", []):
-        exclude.extend(s.get("exclude", []))
+        patterns.extend(s.get("exclude", []))
+
+    # Yeni alanlar:
+    patterns = cfg.get("patterns", patterns)
+    pattern_mode = cfg.get("pattern_mode", "exclude")
 
     use_vss = bool(cfg.get("use_vss", False))
     max_retries = int(cfg.get("max_retries", 3))
 
-    return repo, sources, exclude, use_vss, max_retries
+    return repo, sources, patterns, pattern_mode, use_vss, max_retries
 
 
 # ----------------------------
@@ -449,10 +474,16 @@ def main():
     ap_l = sub.add_parser("list", help="Snapshot listele")
     ap_l.add_argument("--repo", required=True)
 
-    ap_r = sub.add_parser("restore", help="Snapshot geri yükle")
+    ap_r = sub.add_parser("restore", help="Snapshot restore (tam)")
     ap_r.add_argument("--repo", required=True)
     ap_r.add_argument("--snapshot", required=True, help="snapshot id veya latest")
     ap_r.add_argument("--to", required=True, help="hedef klasör")
+
+    ap_rf = sub.add_parser("restore-file", help="Snapshot içinden tek dosya restore")
+    ap_rf.add_argument("--repo", required=True)
+    ap_rf.add_argument("--snapshot", required=True)
+    ap_rf.add_argument("--rel", required=True, help="files altında relative path (örn: TestData/a.pdf)")
+    ap_rf.add_argument("--to", required=True, help="hedef klasör")
 
     ap_v = sub.add_parser("verify", help="Bütünlük kontrolü")
     ap_v.add_argument("--repo", required=True)
@@ -461,17 +492,20 @@ def main():
     args = ap.parse_args()
 
     if args.cmd == "backup":
-        repo, sources, exclude, use_vss, max_r = load_config(Path(args.config))
-        backup(repo, sources, exclude, use_vss, max_r)
+        repo, sources, patterns, mode, use_vss, max_r = load_config(Path(args.config))
+        backup(repo, sources, patterns, mode, use_vss, max_r)
 
     elif args.cmd == "list":
-        snaps = list_snapshots(Path(args.repo))
-        for s in snaps:
+        for s in list_snapshots(Path(args.repo)):
             print(s)
 
     elif args.cmd == "restore":
-        restore(Path(args.repo), args.snapshot, Path(args.to))
+        restore_full_snapshot(Path(args.repo), args.snapshot, Path(args.to))
         print("✅ Restore tamamlandı.")
+
+    elif args.cmd == "restore-file":
+        out = restore_single_file(Path(args.repo), args.snapshot, args.rel, Path(args.to))
+        print(f"✅ Tek dosya restore: {out}")
 
     elif args.cmd == "verify":
         verify(Path(args.repo), args.snapshot)

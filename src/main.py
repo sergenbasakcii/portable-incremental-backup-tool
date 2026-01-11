@@ -1,47 +1,52 @@
-import argparse
+# -*- coding: utf-8 -*-
+import sys
+import traceback
 from pathlib import Path
 
-from engine.backup_engine import backup, list_snapshots, restore, verify, load_config
-
+def show_error(title, message):
+    """
+    Hata oluşursa Windows mesaj kutusu gösterir.
+    Böylece --noconsole modunda bile hatayı görebilirsiniz.
+    """
+    try:
+        import ctypes
+        # 0x10 = Critical Icon
+        ctypes.windll.user32.MessageBoxW(0, str(message), str(title), 0x10)
+    except:
+        # Eğer Windows dışı bir sistemse veya ctypes çalışmazsa
+        print(f"[{title}] {message}", file=sys.stderr)
 
 def main():
-    ap = argparse.ArgumentParser(description="Portable Incremental Backup Tool")
-    sub = ap.add_subparsers(dest="cmd")
+    """
+    Uygulama Başlatıcı (Launcher)
+    """
+    try:
+        # 1. Yol Ayarlaması (EXE vs Python Script)
+        if getattr(sys, 'frozen', False):
+            # EXE içinde çalışıyorsa:
+            # PyInstaller dosyaları geçici bir klasöre (sys._MEIPASS) çıkarır.
+            # Proje kökü burasıdır.
+            project_root = Path(sys._MEIPASS)
+        else:
+            # Normal Python script olarak çalışıyorsa:
+            current_dir = Path(__file__).resolve().parent  # src
+            project_root = current_dir.parent              # proje kökü (yedekleme)
 
-    ap_b = sub.add_parser("backup")
-    ap_b.add_argument("--config", required=True)
+        # Proje kökünü sys.path'e ekle (src modülünün bulunması için)
+        root_str = str(project_root)
+        if root_str not in sys.path:
+            sys.path.insert(0, root_str)
 
-    ap_l = sub.add_parser("list")
-    ap_l.add_argument("--repo", required=True)
+        # 2. GUI'yi Başlat
+        # Import işlemini sys.path ayarlandıktan SONRA yapıyoruz.
+        from src.gui.backup_gui import main as start_gui
+        start_gui()
 
-    ap_r = sub.add_parser("restore")
-    ap_r.add_argument("--repo", required=True)
-    ap_r.add_argument("--snapshot", required=True)
-    ap_r.add_argument("--to", required=True)
-
-    ap_v = sub.add_parser("verify")
-    ap_v.add_argument("--repo", required=True)
-    ap_v.add_argument("--snapshot", required=True)
-
-    args = ap.parse_args()
-
-    if args.cmd == "backup":
-        repo, sources, exclude, use_vss, maxr = load_config(Path(args.config))
-        backup(repo, sources, exclude, use_vss, maxr)
-
-    elif args.cmd == "list":
-        for s in list_snapshots(Path(args.repo)):
-            print(s)
-
-    elif args.cmd == "restore":
-        restore(Path(args.repo), args.snapshot, Path(args.to))
-
-    elif args.cmd == "verify":
-        verify(Path(args.repo), args.snapshot)
-
-    else:
-        ap.print_help()
-
+    except Exception as e:
+        # Herhangi bir hata olursa ekrana mesaj kutusu çıkar
+        error_msg = traceback.format_exc()
+        show_error("Yedekleme Yazılımı Başlatma Hatası", error_msg)
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
