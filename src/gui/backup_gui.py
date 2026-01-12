@@ -4,13 +4,11 @@ import os
 import threading
 from pathlib import Path
 
-# --- HATA DÜZELTME BAŞLANGICI ---
-# Proje kök dizinini sys.path'e ekle (src modülünü bulabilmesi için)
+
 current_dir = Path(__file__).resolve().parent  # .../src/gui
 project_root = current_dir.parent.parent       # .../ (proje kökü)
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
-# --- HATA DÜZELTME BİTİŞİ ---
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QPushButton, QVBoxLayout, QHBoxLayout,
